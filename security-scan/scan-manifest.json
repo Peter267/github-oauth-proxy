@@ -1,0 +1,39 @@
+{
+  "schema": "codex-security-scan/v1",
+  "scan_id": "gh-oauth-proxy-deep-2026-09-26",
+  "mode": "deep",
+  "target": {
+    "name": "github_oauth_proxy",
+    "kind": "codebase",
+    "revision": "working-tree",
+    "vcs": "none (git 未初始化)"
+  },
+  "config": {
+    "model": "claude (host agent)",
+    "reasoning_effort": "xhigh",
+    "delegated_workers": 4,
+    "deep_scan": true
+  },
+  "phases": [
+    { "name": "threat-modeling", "status": "complete" },
+    { "name": "finding-discovery", "status": "complete" },
+    { "name": "validation", "status": "complete" },
+    { "name": "impact-and-path-analysis", "status": "complete" },
+    { "name": "reporting", "status": "complete" },
+    { "name": "structural-hardening", "status": "skipped" },
+    { "name": "finalization", "status": "complete" }
+  ],
+  "counts": {
+    "findings_total": 14,
+    "by_severity": { "critical": 1, "high": 0, "medium": 3, "low": 5, "info": 5 },
+    "fixed": 6,
+    "deferred": 8
+  },
+  "artifacts": {
+    "report": "security-scan/report.md",
+    "findings": "security-scan/findings.json",
+    "coverage": "security-scan/coverage.json"
+  },
+  "exit_code": 0,
+  "generated_at": "2026-09-26T15:35:00Z"
+}

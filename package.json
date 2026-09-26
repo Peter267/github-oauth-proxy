@@ -1,0 +1,25 @@
+{
+  "name": "github-oauth-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "部署在 Cloudflare Workers 上的 GitHub OAuth 中转（代理）服务：为国内业务服务器提供稳定、安全的 GitHub 授权登录",
+  "main": "src/index.ts",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "tail": "wrangler tail --format pretty",
+    "kv:create": "wrangler kv namespace create OAUTH_KV",
+    "gen-secret": "node -e \"console.log(require('node:crypto').randomBytes(32).toString('base64url'))\""
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.99.0"
+  }
+}

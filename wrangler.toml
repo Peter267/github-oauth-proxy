@@ -1,0 +1,95 @@
+#:schema node_modules/wrangler/config-schema.json
+# ============================================================================
+# GitHub OAuth 中转代理 —— Cloudflare Workers 配置
+#
+# 部署前请执行：
+#   1) npm run kv:create                     # 创建 OAUTH_KV，把返回的 id 填到下面
+#   2) npm run kv:create -- --binding RATE_LIMIT_KV  # 可选，用于分布式限流
+#   3) npx wrangler secret put GITHUB_CLIENT_ID
+#      npx wrangler secret put GITHUB_CLIENT_SECRET
+#      npx wrangler secret put COOKIE_SECRET
+#      npx wrangler secret put CALLBACK_SIGNING_SECRET
+#   4) npx wrangler deploy
+# ============================================================================
+
+name = "github-oauth-proxy"
+main = "src/index.ts"
+compatibility_date = "2025-09-23"
+workers_dev = true
+
+# 生产环境建议把 Workers 日志接出去（Workers Logs / Logpush）
+[observability]
+enabled = true
+
+# ---------------------------------------------------------------------------
+# KV 绑定
+# ---------------------------------------------------------------------------
+# 必要：存放一次性 state（防 CSRF）、code 换取结果缓存
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "REPLACE_WITH_OAUTH_KV_ID"
+preview_id = "REPLACE_WITH_OAUTH_KV_PREVIEW_ID"
+
+# 可选：滑动窗口限流计数器。不绑定则退化为「不做分布式限流」
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "REPLACE_WITH_RATE_LIMIT_KV_ID"
+preview_id = "REPLACE_WITH_RATE_LIMIT_KV_PREVIEW_ID"
+
+# ---------------------------------------------------------------------------
+# 非敏感变量（敏感值请用 secret put，禁止写进本文件）
+# ---------------------------------------------------------------------------
+[vars]
+# Worker 对外访问地址；留空则自动使用请求的 origin（推荐显式配置）
+PUBLIC_BASE_URL = "https://gh-oauth-proxy.example.workers.dev"
+
+# 允许作为 redirect_uri（业务服务器接收授权结果的地址）的白名单，逗号分隔。
+# 匹配规则见 README「白名单匹配规则」：
+#   https://api.example.com            -> 该 origin 下任意路径
+#   https://api.example.com/auth/gh    -> origin + 路径精确匹配（忽略 query）
+#   https://api.example.com/auth/*     -> 前缀匹配
+ALLOWED_CALLBACK_URIS = "https://api.example.com/auth/github/callback,http://127.0.0.1:8080/auth/github/callback"
+
+# 允许发起 /authorize 的前端 origin 白名单（校验来源合法性），逗号分隔；留空则不校验
+ALLOWED_CALLBACK_ORIGINS = "https://www.example.com,http://127.0.0.1:8080"
+
+# 允许 success_redirect / error_redirect 指向的地址白名单，逗号分隔；留空则只允许本站
+ALLOWED_REDIRECT_ORIGINS = "https://www.example.com"
+
+# GitHub OAuth App 里申请 scope 的默认值（可用 ?scope= 覆盖）
+DEFAULT_SCOPE = "read:user user:email"
+
+# 若设置 ALLOWED_SCOPES，则 ?scope= 只允许其子集；留空表示仅做字符与数量校验
+ALLOWED_SCOPES = "read:user user:email read:org user"
+
+# 全局默认跳转（可被 ?success_redirect= / ?error_redirect= 覆盖）
+SUCCESS_REDIRECT = "https://www.example.com/login/success"
+ERROR_REDIRECT = "https://www.example.com/login/failed"
+
+# state 有效期（秒）
+STATE_TTL_SECONDS = "600"
+
+# 每个 IP 每分钟允许的 /authorize + /callback 请求数
+RATE_LIMIT_PER_MINUTE = "60"
+
+# 调用 GitHub 的超时与重试
+UPSTREAM_TIMEOUT_MS = "8000"
+UPSTREAM_RETRIES = "2"
+
+# 回传业务服务器的方式：POST（JSON + HMAC 签名，推荐）或 GET（query 参数）
+DELIVERY_METHOD = "POST"
+DELIVERY_TIMEOUT_MS = "8000"
+
+# 是否允许 http:// 的跳转地址（仅本地联调时设为 true）
+ALLOW_INSECURE_REDIRECTS = "false"
+
+ENVIRONMENT = "production"
+VERSION = "1.0.0"
+LOG_LEVEL = "info"
+
+# ---------------------------------------------------------------------------
+# 自定义域名（可选）
+# ---------------------------------------------------------------------------
+# [[routes]]
+# pattern = "gh-oauth.example.com"
+# custom_domain = true

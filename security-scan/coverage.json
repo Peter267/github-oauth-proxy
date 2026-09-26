@@ -1,0 +1,60 @@
+{
+  "scan": "deep",
+  "target": "github_oauth_proxy",
+  "coverage": "complete",
+  "reviewed": [
+    "src/config.ts",
+    "src/crypto.ts",
+    "src/deliver.ts",
+    "src/errors.ts",
+    "src/github.ts",
+    "src/index.ts",
+    "src/logger.ts",
+    "src/pages.ts",
+    "src/ratelimit.ts",
+    "src/responses.ts",
+    "src/state.ts",
+    "src/types.ts",
+    "src/validation.ts",
+    "src/handlers/authorize.ts",
+    "src/handlers/callback.ts",
+    "src/handlers/health.ts",
+    "test/crypto.test.ts",
+    "test/flow.test.ts",
+    "test/helpers.ts",
+    "test/router.test.ts",
+    "test/validation.test.ts",
+    "wrangler.toml",
+    ".dev.vars.example",
+    ".gitignore",
+    "README.md",
+    "INTEGRATION.md",
+    "examples/express-callback.mjs",
+    "examples/flask-callback.py",
+    "examples/frontend-login.html"
+  ],
+  "excluded": [
+    "node_modules/",
+    ".wrangler/ (构建产物)"
+  ],
+  "deferred_surfaces": [],
+  "no_findings_confirmed": [
+    "HTML 转义 / XSS：pages.ts 与 responses.ts 的所有动态插值均经 escapeHtml（含 avatar URL、detail JSON、state）",
+    "密钥卫生：.gitignore 正确排除 .dev.vars/.wrangler；未发现提交的真实密钥（wrangler.toml/.dev.vars.example 均为占位）",
+    "CORS：buildCorsHeaders 仅在 Origin 命中白名单时回显 + Allow-Credentials，未见凭证泄露",
+    "加密：AES-256-GCM 每次随机 96bit IV；HKDF-SHA256 派生固定高熵 secret 合规，无 IV/密钥重用",
+    "token 不外泄给浏览器：/callback 成功分支刻意剔除 access_token",
+    "POST 验签规范与实现一致：timestamp + '.' + rawBody 与 INTEGRATION/示例逐字对应",
+    "normalizeUrl：拒绝非 http(s)、内嵌 userinfo，剥离 hash",
+    "常量时间比较缺失（callback 用 !==）：nonce 为攻击者已知的公开值，不构成可利用时序漏洞"
+  ],
+  "open_questions": [
+    "F-07 的实际可利用性取决于业务侧的会话关联方式（需逐个业务集成确认）"
+  ],
+  "verification": {
+    "regression_tests": "test/security.test.ts（9 用例，修复前 7 失败 → 修复后全通过）",
+    "recheck": "原始 PoC 载荷对当前 checkout 直接复核：已不命中白名单",
+    "typecheck": "tsc --noEmit 通过",
+    "full_suite": "5 文件 / 64 用例全通过"
+  }
+}
