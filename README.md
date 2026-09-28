@@ -13,6 +13,22 @@ Cloudflare 边缘网络上的 Worker 完成；Worker 通过**带 HMAC 签名的�
 
 ---
 
+## 一键部署（无需命令行）
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Peter267/github-oauth-proxy)
+
+点上面的按钮即可部署。Cloudflare 会自动把本仓库克隆到你的账号、创建两个 KV 命名空间并回填 id、
+在部署页引导你填写 4 个 Secret，并配置好 Workers Builds（此后推送到 `main` 自动重新部署）。
+
+**全程只需要浏览器**：不用安装 Node.js、不用装 wrangler、不用打开终端。完整图文步骤见
+**[DEPLOY.md](./DEPLOY.md)**。
+
+> 部署完成后打开 Worker 首页：配置尚未就绪时，它会渲染一个**分步配置引导页**
+> （列出缺什么、去哪儿填，并给出可直接复制的 GitHub OAuth App 回调地址）；
+> 配置补齐后刷新即自动变成绿色运行状态面板 —— 因此纯网页用户不需要靠报错信息猜问题。
+
+---
+
 ## 1. 流程总览
 
 ```
@@ -50,7 +66,7 @@ Cloudflare 边缘网络上的 Worker 完成；Worker 通过**带 HMAC 签名的�
 .
 ├── src/
 │   ├── index.ts                  # Worker 入口与路由
-│   ├── config.ts                 # 配置装载 + fail-fast 校验
+│   ├── config.ts                 # 配置装载 + fail-fast 校验（含占位符密钥拒绝）
 │   ├── errors.ts                 # 错误码 / AppError / 状态码映射
 │   ├── crypto.ts                 # AES-GCM、HMAC、Base64URL、常量时间比较
 │   ├── logger.ts                 # 结构化 JSON 日志 + request id
@@ -59,7 +75,7 @@ Cloudflare 边缘网络上的 Worker 完成；Worker 通过**带 HMAC 签名的�
 │   ├── github.ts                 # GitHub 上游调用（超时 + 重试 + 限流识别）
 │   ├── deliver.ts                # 回传业务服务器（HMAC 签名 + 重试）
 │   ├── responses.ts              # 结构化响应与错误渲染
-│   ├── pages.ts                  # 说明页 / 成功页 / 错误页
+│   ├── pages.ts                  # 状态面板 / 首次部署配置引导页 / 成功页
 │   └── handlers/
 │       ├── authorize.ts          # GET|POST /authorize
 │       ├── callback.ts           # GET /callback
@@ -67,6 +83,7 @@ Cloudflare 边缘网络上的 Worker 完成；Worker 通过**带 HMAC 签名的�
 ├── test/                         # vitest 用例（含端到端流程测试）
 ├── examples/                     # 业务服务器对接示例（Express / Flask / 前端）
 ├── wrangler.toml
+├── DEPLOY.md                     # ★ 纯网页一键部署指南（零命令行）
 ├── INTEGRATION.md                # ★ 业务服务器对接说明（含请求/响应示例）
 └── .dev.vars.example
 ```
@@ -74,6 +91,13 @@ Cloudflare 边缘网络上的 Worker 完成；Worker 通过**带 HMAC 签名的�
 ---
 
 ## 3. 部署
+
+有两条路径，产出的服务完全相同，可以混用（例如先网页部署，之后再克隆到本地开发）：
+
+| 方式 | 适用场景 | 怎么做 |
+| --- | --- | --- |
+| **A. 网页一键部署**（推荐） | 不熟悉命令行、想 10 分钟内上线、交由非开发同事操作 | 点顶部 **Deploy to Cloudflare** 按钮 → 见 **[DEPLOY.md](./DEPLOY.md)** |
+| **B. 命令行部署** | 需要本地调试、接入自动化流水线 | 按下面 3.1 – 3.5 操作 |
 
 ### 3.1 创建 GitHub OAuth App
 
@@ -103,7 +127,10 @@ npx wrangler kv namespace create OAUTH_KV
 npx wrangler kv namespace create RATE_LIMIT_KV
 ```
 
-把返回的 `id` / `preview_id` 填进 `wrangler.toml`。
+把返回的 `id` 填进 `wrangler.toml`。
+
+> 本模板只声明 `id`、不声明 `preview_id`：`wrangler dev` 默认使用**本地 KV 模拟**，不需要它。
+> 若你要用 `wrangler dev --remote`，自行补上 `preview_id` 即可。
 
 ### 3.3 注入 Secrets（禁止硬编码）
 
@@ -119,6 +146,11 @@ npx wrangler secret put CALLBACK_SIGNING_SECRET # 回传报文的 HMAC 签名密
 
 本地开发时把同样的 4 个值写入 `.dev.vars`（复制 `.dev.vars.example`）。
 
+> ⚠️ `.dev.vars.example` 里的值全部是**模板占位符**。服务会主动拒绝占位符
+> （匹配 `replace_with` / `changeme` / `xxxx` 等指纹）并返回 `server_misconfigured`，
+> 避免有人把公开仓库里的示例值当成真密钥上线 —— 那等于 state Cookie 与回传签名可被任意伪造。
+> 这一约束对网页一键部署尤其重要：部署表单会预填模板值，忘了替换就会被显式拦下。
+
 ### 3.4 配置业务侧参数并部署
 
 编辑 `wrangler.toml` 的 `[vars]`（至少改 `PUBLIC_BASE_URL`、`ALLOWED_CALLBACK_URIS`、
@@ -131,7 +163,9 @@ npm run deploy
 curl -s "https://<你的-worker-域名>/health?deep=1" | jq
 ```
 
-浏览器打开 Worker 根路径 `/`，页面会显示**当前生效配置与自检结果**，可用来快速确认白名单是否漏配。
+浏览器打开 Worker 根路径 `/`（等价于 `/setup`）：配置齐全会显示**当前生效配置与自检结果**，
+可用来快速确认白名单是否漏配 —— 页面还会直接给出应填到 GitHub OAuth App 的 `/callback` 地址（带复制按钮）；
+若配置尚未就绪，则渲染**分步配置引导页**，列出缺哪些项、去哪儿填，全程无需命令行。
 
 ### 3.5 本地开发
 
@@ -154,6 +188,10 @@ npm test
 | `GITHUB_CLIENT_SECRET` | ✅ | GitHub OAuth App 的 Client Secret，**绝不下发、绝不打日志** |
 | `COOKIE_SECRET` | ✅ | ≥16 字符。派生 AES-256-GCM 密钥加密 state Cookie（HKDF-SHA256） |
 | `CALLBACK_SIGNING_SECRET` | ✅ | ≥32 字符。对回传业务服务器的报文做 HMAC-SHA256 签名 |
+
+> 4 个 Secret 会被逐一校验：**空值**与**模板占位符**（`replace_with…` / `changeme` 等）都会触发
+> `server_misconfigured` 并快速失败，避免弱密钥或公开可知的密钥被静默使用。
+> 网页一键部署时，这些校验结果会直接呈现在首页引导页上。
 
 ### 4.2 Vars（`wrangler.toml` → `[vars]`）
 
@@ -254,6 +292,18 @@ npm test
 
 `?deep=1` 时额外做 KV 写-读-删往返与 GitHub API 可达性探测（含延迟），用于上线首检。
 `kv` 检查失败返回 `503`，可直接给负载均衡做探针。
+
+### 5.4 `GET /`（等价 `GET /setup`）— 状态面板 / 首次部署引导
+
+浏览器访问的落地页，有两种形态：
+
+| 形态 | 状态码 | 内容 |
+| --- | --- | --- |
+| **状态面板**（配置就绪） | `200` | 端点说明、应填到 GitHub OAuth App 的 `/callback` 地址（带复制按钮）、当前生效配置、配置自检结果 |
+| **配置引导页**（配置缺失） | `503` | 分步引导：缺哪些 Secret / 哪个占位符未替换 / KV 是否缺绑定，以及"去 GitHub 建 OAuth App → 去控制台填变量 → 回来验证"的完整操作路径 |
+
+引导页只暴露**配置项名称**，不暴露任何密钥值。带上 `Accept: application/json` 或 `?format=json`
+时不会走引导页，而是返回结构化 `server_misconfigured` 错误，便于脚本与探针判断。
 
 ---
 
@@ -364,6 +414,10 @@ GitHub 5xx、业务服务器 4xx、限流等异常分支。
 | `delivery_failed` | 业务服务器拒收：检查签名校验逻辑、`Idempotency-Key` 是否被误判、`ALLOWED_CALLBACK_URIS` 是否指向外网可达地址 |
 | 业务服务器收不到回调 | 业务地址必须公网可达；内网地址请改用反向隧道或让前端轮询 |
 | 打开 `/` 发现白名单条数为 0 | 忘了配 `ALLOWED_CALLBACK_URIS`，此时 `/authorize` 会全部拒绝 |
+| 打开 `/` 是黄色「待配置」页且返回 `503` | 正常：这是首次部署的**配置引导页**，不是故障。按页面 4 步补齐 Secret 与变量即可，补齐后自动变为绿色面板 |
+| 报 `检测到未替换的占位符密钥` | 仍在用 `.dev.vars.example` / 部署表单预填的模板值。请换成真实密钥（`COOKIE_SECRET` ≥16、`CALLBACK_SIGNING_SECRET` ≥32 字符） |
+| 网页部署后想改配置 | Cloudflare 控制台 → 你的 Worker → Settings → Variables and Secrets，**保存即生效，无需重新部署** |
+| 一键部署按钮打不开 | 用 [DEPLOY.md 附录 A](./DEPLOY.md#附录-a不用按钮的纯网页部署) 的手工网页路径（Fork + 连接 Git 仓库）
 
 ---
 
@@ -373,3 +427,17 @@ GitHub 5xx、业务服务器 4xx、限流等异常分支。
 （Node/Express 与 Python/Flask）、验签规范、请求与响应示例、`curl` 复现命令与上线检查清单。
 
 `examples/` 目录可直接拷走参考。
+
+---
+
+## 12. 部署与更新速查
+
+| 需求 | 去哪里做 |
+| --- | --- |
+| **纯网页部署（零命令行）** | **[DEPLOY.md](./DEPLOY.md)** —— 点一键部署按钮，全程只需浏览器 |
+| 命令行部署 | 本文 §3 |
+| 改白名单 / 超时 / 限流等参数 | Cloudflare 控制台 → 你的 Worker → Settings → Variables and Secrets（保存即生效） |
+| 改密钥 | 同上，类型选 Secret。换 `COOKIE_SECRET` 会作废进行中的登录会话；换 `CALLBACK_SIGNING_SECRET` 需同步业务服务器 |
+| 改代码 | 改 Cloudflare 克隆到你账号下的仓库 → 推送到 `main` → Workers Builds 自动构建部署 |
+| 回滚到历史版本 | Cloudflare 控制台 → 你的 Worker → Deployments → Rollback |
+| 看实时日志 | `npx wrangler tail`，或 Cloudflare 控制台的 Logs 视图 |
