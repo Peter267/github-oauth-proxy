@@ -21,5 +21,27 @@
     "typescript": "^5.6.3",
     "vitest": "^2.1.8",
     "wrangler": "^3.99.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "GITHUB_CLIENT_ID": {
+        "description": "GitHub OAuth App 的 **Client ID**。先在 [GitHub OAuth Apps](https://github.com/settings/developers) 新建应用，**Authorization callback URL** 填本 Worker 的 `/callback`（部署完成后打开 Worker 首页可直接复制这个地址）。"
+      },
+      "GITHUB_CLIENT_SECRET": {
+        "description": "同一个 OAuth App 的 **Client Secret**（生成后仅显示一次）。它只用于服务端换取 `access_token`，绝不下发给浏览器。"
+      },
+      "COOKIE_SECRET": {
+        "description": "加密防 CSRF 的 state Cookie（AES-256-GCM），**至少 16 字符**。生成随机串：`openssl rand -hex 32`，或在浏览器控制台执行 `Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('')`。"
+      },
+      "CALLBACK_SIGNING_SECRET": {
+        "description": "回传业务服务器报文的 HMAC-SHA256 签名密钥，**至少 32 字符**，需与业务服务器上的同一变量完全一致。生成方式同 `COOKIE_SECRET`。"
+      },
+      "OAUTH_KV": {
+        "description": "存放一次性 state（防 CSRF）与限流计数。由部署流程自动创建并绑定，无需手动填写。"
+      },
+      "RATE_LIMIT_KV": {
+        "description": "可选。分布式限流计数器。不绑定则退化为不做分布式限流（仅建议用于本地联调）。"
+      }
+    }
   }
 }

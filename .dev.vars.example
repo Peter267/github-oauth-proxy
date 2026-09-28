@@ -1,13 +1,29 @@
-# 本地开发用（wrangler dev 会读取 .dev.vars，生产环境必须使用 wrangler secret put）
-# 复制为 .dev.vars 后填入真实值；.dev.vars 已在 .gitignore 中，不会被提交。
+# ============================================================================
+# GitHub OAuth 中转 —— Secrets 模板
 #
-# 生成随机密钥：npm run gen-secret
+# 用途 1｜本地开发      ：复制为 .dev.vars 并填入真实值（.dev.vars 已被 .gitignore 忽略）
+# 用途 2｜网页一键部署  ：Cloudflare 的「Deploy to Cloudflare」按钮会读取本文件，
+#                        在部署页逐项引导你填写这 4 个 Secret（详见 DEPLOY.md）
+#
+# ⚠️ 下面的值全部是占位符。服务在启动时会主动拒绝占位符，必须换成真实值。
+#
+# 生成随机密钥的两种方式：
+#   · 命令行   ：npm run gen-secret
+#   · 纯浏览器 ：打开任意网页按 F12，在 Console 执行
+#                Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('')
+# ============================================================================
 
-GITHUB_CLIENT_ID=Ov23liXXXXXXXXXXXXXX
-GITHUB_CLIENT_SECRET=replace_with_github_app_client_secret
+# GitHub OAuth App 的 Client ID
+# （GitHub → Settings → Developer settings → OAuth Apps → New OAuth App）
+GITHUB_CLIENT_ID=replace_with_your_github_client_id
 
-# 用于加密 state Cookie（AES-256-GCM），一旦更换，所有进行中的登录会话失效
+# 同一个 OAuth App 的 Client Secret。绝不下发、绝不打日志
+GITHUB_CLIENT_SECRET=replace_with_your_github_client_secret
+
+# 用于加密防 CSRF 的 state Cookie（AES-256-GCM），至少 16 字符。
+# 一旦更换，所有进行中的登录会话立即失效
 COOKIE_SECRET=replace_with_32_byte_random_string
 
-# 用于对回传业务服务器的 JSON 报文做 HMAC-SHA256 签名
+# 用于对回传业务服务器的 JSON 报文做 HMAC-SHA256 签名，至少 32 字符。
+# 必须与业务服务器上的同一变量保持一致
 CALLBACK_SIGNING_SECRET=replace_with_32_byte_random_string

@@ -2,18 +2,28 @@
 # ============================================================================
 # GitHub OAuth 中转代理 —— Cloudflare Workers 配置
 #
-# 部署前请执行：
-#   1) npm run kv:create                     # 创建 OAUTH_KV，把返回的 id 填到下面
-#   2) npm run kv:create -- --binding RATE_LIMIT_KV  # 可选，用于分布式限流
-#   3) npx wrangler secret put GITHUB_CLIENT_ID
-#      npx wrangler secret put GITHUB_CLIENT_SECRET
-#      npx wrangler secret put COOKIE_SECRET
-#      npx wrangler secret put CALLBACK_SIGNING_SECRET
-#   4) npx wrangler deploy
+# ┌─ 方式 A：网页一键部署（推荐，无需安装任何命令行工具）
+# │    点 README 顶部的「Deploy to Cloudflare」按钮，Cloudflare 会自动：
+# │      · 把本仓库克隆到你自己的 GitHub 账号
+# │      · 自动创建下方两个 KV 命名空间并把真实 id 回填到本文件
+# │      · 读取 .dev.vars.example，在部署页引导你填写 4 个 Secrets
+# │      · 配置 Workers Builds（此后推送到 main 即自动重新部署）
+# │    详见 DEPLOY.md
+# └─
+# ┌─ 方式 B：命令行部署
+# │    1) npm run kv:create                            # 创建 OAUTH_KV
+# │       npm run kv:create -- --binding RATE_LIMIT_KV # 可选：分布式限流
+# │    2) npx wrangler secret put GITHUB_CLIENT_ID
+# │       npx wrangler secret put GITHUB_CLIENT_SECRET
+# │       npx wrangler secret put COOKIE_SECRET
+# │       npx wrangler secret put CALLBACK_SIGNING_SECRET
+# │    3) npx wrangler deploy
+# └─
 # ============================================================================
 
 name = "github-oauth-proxy"
 main = "src/index.ts"
+# 建议跟随 Cloudflare 发布节奏更新，但升级前请先跑 npm test 回归
 compatibility_date = "2025-09-23"
 workers_dev = true
 
@@ -24,37 +34,48 @@ enabled = true
 # ---------------------------------------------------------------------------
 # KV 绑定
 # ---------------------------------------------------------------------------
-# 必要：存放一次性 state（防 CSRF）、code 换取结果缓存
+# 请勿手动修改下面的 id：
+#   · 网页一键部署：Cloudflare 会自动创建命名空间并把真实 id 回填到本文件；
+#   · 命令行部署  ：把 npm run kv:create 返回的 id 覆盖进来。
+# 这里只声明 id（不声明 preview_id）——`wrangler dev` 默认走本地 KV 模拟，不需要它；
+# 若你需要 `wrangler dev --remote`，再自行补上 preview_id 即可。
+#
+# 必要：存放一次性 state（防 CSRF）与限流计数器
 [[kv_namespaces]]
 binding = "OAUTH_KV"
 id = "REPLACE_WITH_OAUTH_KV_ID"
-preview_id = "REPLACE_WITH_OAUTH_KV_PREVIEW_ID"
 
 # 可选：滑动窗口限流计数器。不绑定则退化为「不做分布式限流」
 [[kv_namespaces]]
 binding = "RATE_LIMIT_KV"
 id = "REPLACE_WITH_RATE_LIMIT_KV_ID"
-preview_id = "REPLACE_WITH_RATE_LIMIT_KV_PREVIEW_ID"
 
 # ---------------------------------------------------------------------------
-# 非敏感变量（敏感值请用 secret put，禁止写进本文件）
+# 非敏感变量（敏感值请用 secret，禁止写进本文件；本文件会进 Git 历史）
+#
+# 备注：这些变量在网页部署页与 Cloudflare 控制台的
+#       「Settings → Variables and Secrets」中都可以随时修改，无需重新部署。
 # ---------------------------------------------------------------------------
 [vars]
-# Worker 对外访问地址；留空则自动使用请求的 origin（推荐显式配置）
-PUBLIC_BASE_URL = "https://gh-oauth-proxy.example.workers.dev"
+# Worker 对外访问地址。留空表示自动使用请求的 origin，
+# 这样一键部署后无需修改即可直接用分配的 *.workers.dev 域名工作。
+# 绑定了自定义域名后建议显式填写 https://gh-oauth.example.com（无末尾斜杠）。
+PUBLIC_BASE_URL = ""
 
-# 允许作为 redirect_uri（业务服务器接收授权结果的地址）的白名单，逗号分隔。
+# ★ 部署后必须配置：允许作为 redirect_uri（业务服务器接收授权结果的地址）的白名单。
+# 留空是**故意**的 fail-closed 行为 —— /authorize 会拒绝所有请求，
+# 避免配置遗漏演变成开放重定向漏洞。请填成你自己的业务回调地址。
 # 匹配规则见 README「白名单匹配规则」：
 #   https://api.example.com            -> 该 origin 下任意路径
 #   https://api.example.com/auth/gh    -> origin + 路径精确匹配（忽略 query）
-#   https://api.example.com/auth/*     -> 前缀匹配
-ALLOWED_CALLBACK_URIS = "https://api.example.com/auth/github/callback,http://127.0.0.1:8080/auth/github/callback"
+#   https://api.example.com/auth/*     -> 通配符匹配
+ALLOWED_CALLBACK_URIS = ""
 
 # 允许发起 /authorize 的前端 origin 白名单（校验来源合法性），逗号分隔；留空则不校验
-ALLOWED_CALLBACK_ORIGINS = "https://www.example.com,http://127.0.0.1:8080"
+ALLOWED_CALLBACK_ORIGINS = ""
 
 # 允许 success_redirect / error_redirect 指向的地址白名单，逗号分隔；留空则只允许本站
-ALLOWED_REDIRECT_ORIGINS = "https://www.example.com"
+ALLOWED_REDIRECT_ORIGINS = ""
 
 # GitHub OAuth App 里申请 scope 的默认值（可用 ?scope= 覆盖）
 DEFAULT_SCOPE = "read:user user:email"
@@ -62,9 +83,9 @@ DEFAULT_SCOPE = "read:user user:email"
 # 若设置 ALLOWED_SCOPES，则 ?scope= 只允许其子集；留空表示仅做字符与数量校验
 ALLOWED_SCOPES = "read:user user:email read:org user"
 
-# 全局默认跳转（可被 ?success_redirect= / ?error_redirect= 覆盖）
-SUCCESS_REDIRECT = "https://www.example.com/login/success"
-ERROR_REDIRECT = "https://www.example.com/login/failed"
+# 全局默认跳转（可被 ?success_redirect= / ?error_redirect= 覆盖）；留空则渲染内置成功页
+SUCCESS_REDIRECT = ""
+ERROR_REDIRECT = ""
 
 # state 有效期（秒）
 STATE_TTL_SECONDS = "600"
