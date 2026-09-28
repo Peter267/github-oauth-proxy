@@ -146,15 +146,23 @@ npx wrangler secret put CALLBACK_SIGNING_SECRET # 回传报文的 HMAC 签名密
 
 本地开发时把同样的 4 个值写入 `.dev.vars`（复制 `.dev.vars.example`）。
 
-> ⚠️ `.dev.vars.example` 里的值全部是**模板占位符**。服务会主动拒绝占位符
-> （匹配 `replace_with` / `changeme` / `xxxx` 等指纹）并返回 `server_misconfigured`，
-> 避免有人把公开仓库里的示例值当成真密钥上线 —— 那等于 state Cookie 与回传签名可被任意伪造。
+> ⚠️ `.dev.vars.example` 里的值全部是**模板占位符**。服务启动时会按**五类**问题逐类快速失败
+> （统一返回 `server_misconfigured`）：
+>
+> 1. **缺失 / 空值**（Secret 未注入或为空串；`OAUTH_KV` 绑定缺失也归入这一类）；
+> 2. **取值非法**（非字符串，或剔除空白 / 不可见字符后为空）；
+> 3. **占位符**（匹配 `replace_with` / `changeme` / `xxxx` 等指纹，或整串是纯数字 / `password` 这类公开弱口令）；
+> 4. **弱密钥**（`GITHUB_CLIENT_ID` < 10、`GITHUB_CLIENT_SECRET` < 16、`COOKIE_SECRET` < 16、
+>    `CALLBACK_SIGNING_SECRET` < 32 字符，或其中三把随机密钥去重后字符种类 < 8）；
+> 5. **两把密钥相同**（`COOKIE_SECRET` 与 `CALLBACK_SIGNING_SECRET` 复用同一串）。
+>
+> 这样可避免有人把公开仓库里的示例值当成真密钥上线 —— 那等于 state Cookie 与回传签名可被任意伪造。
 > 这一约束对网页一键部署尤其重要：部署表单会预填模板值，忘了替换就会被显式拦下。
 
 ### 3.4 配置业务侧参数并部署
 
-编辑 `wrangler.toml` 的 `[vars]`（至少改 `PUBLIC_BASE_URL`、`ALLOWED_CALLBACK_URIS`、
-`ALLOWED_CALLBACK_ORIGINS`、`ALLOWED_REDIRECT_ORIGINS`），然后：
+编辑 `wrangler.toml` 的 `[vars]`（**至少配置 `ALLOWED_CALLBACK_URIS` 与 `ALLOWED_CALLBACK_ORIGINS`**；
+生产环境建议再显式设置 `PUBLIC_BASE_URL`，并按需配置 `ALLOWED_REDIRECT_ORIGINS`），然后：
 
 ```bash
 npm run deploy
@@ -162,6 +170,10 @@ npm run deploy
 # 首次上线后做一次深检查（会真实探测 GitHub 可达性）
 curl -s "https://<你的-worker-域名>/health?deep=1" | jq
 ```
+
+> `PUBLIC_BASE_URL` 默认为空即可用（自动回落到请求 origin），**并非必须修改**；但留空时
+> `/callback` 地址、"同源"判定与 state Cookie 的 `Secure` 标志都锚定在**请求自带的 origin** 上，
+> 生产环境显式固定为 `https://<你的域名>` 可消除这一外部可影响的变量（纵深防御）。
 
 浏览器打开 Worker 根路径 `/`（等价于 `/setup`）：配置齐全会显示**当前生效配置与自检结果**，
 可用来快速确认白名单是否漏配 —— 页面还会直接给出应填到 GitHub OAuth App 的 `/callback` 地址（带复制按钮）；
@@ -184,22 +196,25 @@ npm test
 
 | 名称 | 必需 | 说明 |
 | --- | --- | --- |
-| `GITHUB_CLIENT_ID` | ✅ | GitHub OAuth App 的 Client ID |
-| `GITHUB_CLIENT_SECRET` | ✅ | GitHub OAuth App 的 Client Secret，**绝不下发、绝不打日志** |
-| `COOKIE_SECRET` | ✅ | ≥16 字符。派生 AES-256-GCM 密钥加密 state Cookie（HKDF-SHA256） |
-| `CALLBACK_SIGNING_SECRET` | ✅ | ≥32 字符。对回传业务服务器的报文做 HMAC-SHA256 签名 |
+| `GITHUB_CLIENT_ID` | ✅ | GitHub OAuth App 的 Client ID，**≥10 字符** |
+| `GITHUB_CLIENT_SECRET` | ✅ | GitHub OAuth App 的 Client Secret，**≥16 字符、去重后字符种类 ≥8**，**绝不下发、绝不打日志** |
+| `COOKIE_SECRET` | ✅ | **≥16 字符、去重后字符种类 ≥8**。派生 AES-256-GCM 密钥加密 state Cookie（HKDF-SHA256）。**必须与 `CALLBACK_SIGNING_SECRET` 不同** |
+| `CALLBACK_SIGNING_SECRET` | ✅ | **≥32 字符、去重后字符种类 ≥8**。对回传业务服务器的报文做 HMAC-SHA256 签名。**必须与 `COOKIE_SECRET` 不同** |
 
-> 4 个 Secret 会被逐一校验：**空值**与**模板占位符**（`replace_with…` / `changeme` 等）都会触发
-> `server_misconfigured` 并快速失败，避免弱密钥或公开可知的密钥被静默使用。
-> 网页一键部署时，这些校验结果会直接呈现在首页引导页上。
+> 服务端**强制拒绝** `COOKIE_SECRET` 与 `CALLBACK_SIGNING_SECRET` 取值相同：复用同一把密钥会同时削弱
+> state Cookie 加密与回传报文签名，两处都被同一份泄露牵连。请分别生成两个独立的随机串。
+>
+> 4 个 Secret 会被逐一校验：**空值 / 纯空白 / 非字符串**、**模板占位符**（`replace_with…` / `changeme` 等）、
+> **弱密钥**（长度未达上表中最小长度，或去重后字符种类 < 8）都会触发 `server_misconfigured` 并快速失败，
+> 避免弱密钥或公开可知的密钥被静默使用。网页一键部署时，这些校验结果会直接呈现在首页引导页上。
 
 ### 4.2 Vars（`wrangler.toml` → `[vars]`）
 
 | 名称 | 默认 | 说明 |
 | --- | --- | --- |
-| `PUBLIC_BASE_URL` | 请求 origin | Worker 对外地址，决定 `redirect_uri=https://<base>/callback` |
-| `ALLOWED_CALLBACK_URIS` | 空（拒绝全部） | 业务服务器接收结果的地址白名单，逗号分隔。**必填** |
-| `ALLOWED_CALLBACK_ORIGINS` | 空（不校验） | 允许发起 `/authorize` 的前端 Origin 白名单 |
+| `PUBLIC_BASE_URL` | 请求 origin | Worker 对外地址，决定 `redirect_uri=<base>/callback`、同源判定与 Cookie `Secure`。**生产建议显式填 `https://…`**（留空时上述判定锚定在请求 origin 上） |
+| `ALLOWED_CALLBACK_URIS` | 空（**拒绝全部**，fail-closed） | 业务服务器接收结果的地址白名单，逗号分隔。**必填** |
+| `ALLOWED_CALLBACK_ORIGINS` | 空（**不校验来源**，fail-open） | 允许发起 `/authorize` 的前端 Origin 白名单。**强烈建议必填**（服务端仅告警、不强制，留空不会拒绝启动）：留空即任何站点都能发起授权（login-CSRF 前置条件）；token 不会因此泄露，但仍应显式配置 |
 | `ALLOWED_REDIRECT_ORIGINS` | 空 | 允许 `success_redirect` / `error_redirect` 指向的地址 |
 | `DEFAULT_SCOPE` | `read:user user:email` | 未传 `scope` 时使用 |
 | `ALLOWED_SCOPES` | 空 | 非空时 `?scope=` 只能是它的子集 |
@@ -211,6 +226,7 @@ npm test
 | `DELIVERY_METHOD` | `POST` | 回传方式：`POST`（JSON+签名，推荐）或 `GET`（query） |
 | `DELIVERY_TIMEOUT_MS` | `8000` | 回传业务服务器的超时 |
 | `ALLOW_INSECURE_REDIRECTS` | `false` | 是否允许 `http://` 跳转地址（仅联调开启） |
+| `ALLOW_UNBOUND_STATE` | `false` | `true` 时 JSON 模式（`?format=json` 或 `Accept: application/json`）跳过 state Cookie 绑定，存在 login-CSRF 风险，**仅用于无法使用 Cookie 的集成** |
 | `ENVIRONMENT` | `production` | 非 `production` 时错误页会展示 `detail`，便于调试 |
 | `VERSION` / `LOG_LEVEL` | `1.0.0` / `info` | 版本号 / 日志级别（`debug`/`info`/`warn`/`error`） |
 
@@ -227,6 +243,10 @@ npm test
 
 > 未配置 `ALLOWED_CALLBACK_URIS` 时，`/authorize` 会**拒绝所有请求**（fail-closed），
 > 避免配置遗漏演变成开放重定向漏洞。
+>
+> 注意 `ALLOWED_CALLBACK_ORIGINS` 的语义**相反**：留空不是 fail-closed，而是**完全不校验来源**
+> （fail-open），任何站点都能发起你的登录流程。token 仍受 `ALLOWED_CALLBACK_URIS` 保护不会被窃取，
+> 但 login-CSRF 的前置条件被放开，因此**强烈建议显式配置**（服务端只告警、不强制，留空不会拒绝启动）。
 
 ---
 
@@ -250,7 +270,7 @@ npm test
 **响应（默认，浏览器导航）**：`302` + `Location: https://github.com/login/oauth/authorize?...`
 + `Set-Cookie: gh_oauth_state=…; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`
 
-**响应（`?format=json`）**：
+**响应（`?format=json` 或 `Accept: application/json`）**：
 
 ```json
 {
@@ -264,6 +284,12 @@ npm test
 }
 ```
 
+> JSON 模式**默认同样完成 state Cookie 绑定**：调用方必须带 `credentials: 'include'`，且其前端 origin
+> 须在 `ALLOWED_CALLBACK_ORIGINS` 内（否则 CORS 不会返回 `Allow-Credentials`，拿不到 `Set-Cookie`）。
+> 回调由 GitHub 发起、是顶层导航，`SameSite=Lax` 的 Cookie 会随请求带回，绑定因此成立。
+> 只有显式设置 `ALLOW_UNBOUND_STATE=true` 时才跳过该绑定（存在 login-CSRF 风险）。
+> 对接细节见 [INTEGRATION.md §1 方式 C](./INTEGRATION.md)。
+
 ### 5.2 `GET /callback` — GitHub 回调（由 GitHub 调用）
 
 | 参数 | 说明 |
@@ -274,7 +300,10 @@ npm test
 
 处理顺序：限流 → 取用并销毁 state → 校验 Cookie 绑定 → 换 token → 拉用户 → 签名回传 → 跳转。
 
-响应：配置了 `success_redirect` 则 `302`；否则渲染内置成功页（`?format=json` 时返回 JSON）。
+响应：配置了 `success_redirect` 则 `302`；否则渲染内置成功页。
+**内容协商口径与全站一致**：带 `?format=json` **或** `Accept: application/json` 时返回 JSON ——
+成功与失败分支现在走同一套判定（复用 `wantsJson`），因此集成方只需固定一种写法，即可同时拿到
+两边的 JSON，不会出现"成功返 HTML、失败返 JSON"的错位。
 两种情况**都不会**把 access_token 返回给浏览器。
 
 ### 5.3 `GET /health` — 健康检查
@@ -348,13 +377,14 @@ npm test
 | --- | --- |
 | CSRF / 授权码注入 | 每次授权签发 256bit 一次性 `state`，存 KV 且**读取即删除**（`expirationTtl` 双重过期）；回调时校验 |
 | 跨浏览器重放 | `state` 额外用 **AES-256-GCM 加密绑定到 Cookie**（HttpOnly + Secure + SameSite=Lax），形成双提交校验 |
+| JSON 模式 CSRF | JSON 模式（`?format=json` 或 `Accept: application/json`）**默认同样要求** state Cookie 绑定（前端带 `credentials: 'include'`）；仅当显式设置 `ALLOW_UNBOUND_STATE=true` 时才退回「只依赖 KV 一次性 state」的降级行为 |
 | 开放重定向 | `redirect_uri` / `success_redirect` / `error_redirect` 全部比对白名单（fail-closed），并剥离 URL hash |
 | 凭证泄露 | Client ID/Secret 仅存 Secrets；`code`/`access_token` 永不入日志，日志里只出现 `token_fp`（SHA-256 前 12 位） |
 | 报文伪造/重放 | 回传业务服务器的报文做 HMAC-SHA256 签名，签名覆盖 `timestamp + "." + rawBody`；业务侧校验时间窗 + `request_id` 幂等去重 |
 | 令牌泄露到浏览器 | `access_token` 仅出现在服务端到服务端的签名报文中；`/callback` 面向浏览器的响应只含用户公开信息 |
 | 慢连接拖挂 | 所有上游请求强制超时（`UPSTREAM_TIMEOUT_MS`），失败按幂等性退避重试，尊重 `Retry-After` |
 | 刷量/撞库 | KV 固定窗口限流（按 IP 指纹），可与 Cloudflare Rate limiting rules 叠加 |
-| 缓存泄露 | 所有响应 `Cache-Control: no-store` + `Referrer-Policy: no-referrer` + `X-Frame-Options: DENY` |
+| 缓存泄露 | 响应带统一安全头清单：`Cache-Control: no-store` + `Referrer-Policy: no-referrer` + `X-Frame-Options: DENY`（`/favicon.ico` 的 204 空响应除外） |
 
 > 关于限流精度：Workers KV 是最终一致的，KV 计数属于**近似限流**，用于兜底；生产环境若要强一致
 > 限流，请在 Cloudflare Dashboard 为 `/authorize`、`/callback` 配置 Rate limiting rules。
@@ -407,15 +437,16 @@ GitHub 5xx、业务服务器 4xx、限流等异常分支。
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| GitHub 报 `redirect_uri_mismatch` | OAuth App 的 callback URL 必须精确等于 `https://<PUBLIC_BASE_URL>/callback`（含协议、无末尾斜杠） |
+| GitHub 报 `redirect_uri_mismatch` | OAuth App 的 callback URL 必须精确等于 `<PUBLIC_BASE_URL（若已显式设置）或 Worker 的实际域名>/callback`（含协议、无末尾斜杠）。`PUBLIC_BASE_URL` 默认为空，此时以请求的 origin 为准 |
+| 回调返回 `state_mismatch` | 用户在别的浏览器/无痕窗口完成授权；或 Worker 换了 `COOKIE_SECRET`；若使用 JSON 模式，前端未带 `credentials: 'include'`（见 [INTEGRATION.md](./INTEGRATION.md)） |
+| 任意站点都能拉起登录流程 | `ALLOWED_CALLBACK_ORIGINS` 留空时不校验来源（fail-open）。请填上业务前端域名；token 仍受 `ALLOWED_CALLBACK_URIS` 保护 |
 | 回调返回 `state_expired` | 用户在结果页刷新了；或 `STATE_TTL_SECONDS` 太小；或 KV 绑定错误 |
-| 回调返回 `state_mismatch` | 用户在别的浏览器/无痕窗口完成授权；或 Worker 换了 `COOKIE_SECRET` |
 | 回调返回 `server_misconfigured` | `GITHUB_CLIENT_SECRET` 填错；或漏了 `OAUTH_KV` 绑定；错误详情 `detail.hint` 会指明 |
 | `delivery_failed` | 业务服务器拒收：检查签名校验逻辑、`Idempotency-Key` 是否被误判、`ALLOWED_CALLBACK_URIS` 是否指向外网可达地址 |
 | 业务服务器收不到回调 | 业务地址必须公网可达；内网地址请改用反向隧道或让前端轮询 |
 | 打开 `/` 发现白名单条数为 0 | 忘了配 `ALLOWED_CALLBACK_URIS`，此时 `/authorize` 会全部拒绝 |
 | 打开 `/` 是黄色「待配置」页且返回 `503` | 正常：这是首次部署的**配置引导页**，不是故障。按页面 4 步补齐 Secret 与变量即可，补齐后自动变为绿色面板 |
-| 报 `检测到未替换的占位符密钥` | 仍在用 `.dev.vars.example` / 部署表单预填的模板值。请换成真实密钥（`COOKIE_SECRET` ≥16、`CALLBACK_SIGNING_SECRET` ≥32 字符） |
+| 报 `检测到未替换的占位符密钥` / `密钥强度不足` / 密钥相同 | 仍在使用 `.dev.vars.example` / 部署表单预填的模板值，或密钥过短、两把随机密钥用了同一串。请换成独立生成的真实值（`GITHUB_CLIENT_ID` ≥10、`GITHUB_CLIENT_SECRET` ≥16、`COOKIE_SECRET` ≥16、`CALLBACK_SIGNING_SECRET` ≥32 字符，其中三把随机密钥去重后字符种类均 ≥8，且 `COOKIE_SECRET` 与 `CALLBACK_SIGNING_SECRET` 不同） |
 | 网页部署后想改配置 | Cloudflare 控制台 → 你的 Worker → Settings → Variables and Secrets，**保存即生效，无需重新部署** |
 | 一键部署按钮打不开 | 用 [DEPLOY.md 附录 A](./DEPLOY.md#附录-a不用按钮的纯网页部署) 的手工网页路径（Fork + 连接 Git 仓库）
 

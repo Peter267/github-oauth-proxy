@@ -60,9 +60,13 @@ id = "REPLACE_WITH_RATE_LIMIT_KV_ID"
 # Worker 对外访问地址。留空表示自动使用请求的 origin，
 # 这样一键部署后无需修改即可直接用分配的 *.workers.dev 域名工作。
 # 绑定了自定义域名后建议显式填写 https://gh-oauth.example.com（无末尾斜杠）。
+#
+# 生产环境建议显式固定该值（而不是留空）：留空时「同源」判定与 Cookie 的 Secure 标志
+# 都锚定在**请求自带的 origin** 上，等于把安全边界交给外部可影响的信息；显式填写后
+# callback 地址、同源判定、CORS 回显、Secure 标志全部锁定到同一个已知域名。
 PUBLIC_BASE_URL = ""
 
-# ★ 部署后必须配置：允许作为 redirect_uri（业务服务器接收授权结果的地址）的白名单。
+# ★ 上线必须配置：允许作为 redirect_uri（业务服务器接收授权结果的地址）的白名单。
 # 留空是**故意**的 fail-closed 行为 —— /authorize 会拒绝所有请求，
 # 避免配置遗漏演变成开放重定向漏洞。请填成你自己的业务回调地址。
 # 匹配规则见 README「白名单匹配规则」：
@@ -71,7 +75,12 @@ PUBLIC_BASE_URL = ""
 #   https://api.example.com/auth/*     -> 通配符匹配
 ALLOWED_CALLBACK_URIS = ""
 
-# 允许发起 /authorize 的前端 origin 白名单（校验来源合法性），逗号分隔；留空则不校验
+# ★ 强烈建议配置：允许发起 /authorize 的前端 origin 白名单（校验来源合法性），逗号分隔。
+# 注意：它**不是服务端强制项** —— 留空不会导致启动被拒，只会让首页出现一条告警。
+# 语义与 ALLOWED_CALLBACK_URIS **相反**：留空不是 fail-closed，而是**完全不校验来源**，
+# 任何站点都能拉起你的授权流程（login-CSRF 的前置条件）。token 本身不会因此泄露
+# （ALLOWED_CALLBACK_URIS 仍会拦住回传地址），但请务必填上你的业务前端域名。
+# 例：https://www.example.com,https://app.example.com
 ALLOWED_CALLBACK_ORIGINS = ""
 
 # 允许 success_redirect / error_redirect 指向的地址白名单，逗号分隔；留空则只允许本站
@@ -103,6 +112,13 @@ DELIVERY_TIMEOUT_MS = "8000"
 
 # 是否允许 http:// 的跳转地址（仅本地联调时设为 true）
 ALLOW_INSECURE_REDIRECTS = "false"
+
+# 是否允许 JSON 模式（?format=json / Accept: application/json）跳过 state Cookie 绑定。
+# 默认 "false"：JSON 模式**同样**要求完成 Cookie 绑定 —— 前端调用 /authorize 时须带
+# credentials: 'include'，且该前端 origin 必须在 ALLOWED_CALLBACK_ORIGINS 白名单内。
+# 设为 "true" 会恢复到旧行为（JSON 模式只依赖 KV 的一次性 state），代价是削弱 CSRF 防护
+# （login-CSRF 的前置条件被放开），仅在确实无法使用 Cookie 的集成场景下临时启用。
+ALLOW_UNBOUND_STATE = "false"
 
 ENVIRONMENT = "production"
 VERSION = "1.0.0"

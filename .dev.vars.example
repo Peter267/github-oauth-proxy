@@ -7,23 +7,36 @@
 #
 # ⚠️ 下面的值全部是占位符。服务在启动时会主动拒绝占位符，必须换成真实值。
 #
+# 服务端强制的取值约束（违反任意一条都会以 server_misconfigured 快速失败）：
+#   · GITHUB_CLIENT_ID         至少 10 字符
+#   · GITHUB_CLIENT_SECRET     至少 16 字符
+#   · COOKIE_SECRET            至少 16 字符
+#   · CALLBACK_SIGNING_SECRET  至少 32 字符
+#   · 去重后字符种类不少于 8 —— 三把随机密钥（GITHUB_CLIENT_SECRET /
+#     COOKIE_SECRET / CALLBACK_SIGNING_SECRET）都须满足，用于挡住 "aaa…" 这类低熵串
+#   · COOKIE_SECRET 与 CALLBACK_SIGNING_SECRET 必须**不同**（复用同一把密钥会
+#     同时削弱 state Cookie 加密与回传报文签名两条防线）
+#
 # 生成随机密钥的两种方式：
 #   · 命令行   ：npm run gen-secret
 #   · 纯浏览器 ：打开任意网页按 F12，在 Console 执行
 #                Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('')
 # ============================================================================
 
-# GitHub OAuth App 的 Client ID
+# GitHub OAuth App 的 Client ID（至少 10 字符）
 # （GitHub → Settings → Developer settings → OAuth Apps → New OAuth App）
 GITHUB_CLIENT_ID=replace_with_your_github_client_id
 
-# 同一个 OAuth App 的 Client Secret。绝不下发、绝不打日志
+# 同一个 OAuth App 的 Client Secret（至少 16 字符，去重后字符种类不少于 8）。
+# 绝不下发、绝不打日志
 GITHUB_CLIENT_SECRET=replace_with_your_github_client_secret
 
-# 用于加密防 CSRF 的 state Cookie（AES-256-GCM），至少 16 字符。
+# 用于加密防 CSRF 的 state Cookie（AES-256-GCM），至少 16 字符、去重后字符种类
+# 不少于 8，且必须与下方 CALLBACK_SIGNING_SECRET 不同。
 # 一旦更换，所有进行中的登录会话立即失效
 COOKIE_SECRET=replace_with_32_byte_random_string
 
-# 用于对回传业务服务器的 JSON 报文做 HMAC-SHA256 签名，至少 32 字符。
+# 用于对回传业务服务器的 JSON 报文做 HMAC-SHA256 签名，至少 32 字符、去重后字符种类
+# 不少于 8，且必须与上方 COOKIE_SECRET 不同。
 # 必须与业务服务器上的同一变量保持一致
 CALLBACK_SIGNING_SECRET=replace_with_32_byte_random_string

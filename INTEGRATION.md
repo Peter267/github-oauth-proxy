@@ -85,18 +85,28 @@ def login_github():
 
 ### 方式 C：JSON 模式（SPA / 弹窗）
 
-先取授权 URL，再由前端决定何时跳转（便于先弹自定义 Loading、记录埋点等）：
+先取授权 URL，再由前端决定何时跳转（便于先弹自定义 Loading、记录埋点等）。
+**注意：JSON 模式同样需要完成 state Cookie 绑定**，因此必须带 `credentials: 'include'`：
 
 ```js
 const res = await fetch(
   'https://gh-oauth.example.workers.dev/authorize?format=json' +
     '&redirect_uri=' + encodeURIComponent('https://api.example.com/auth/github/callback') +
     '&state=' + encodeURIComponent(state),
-  { credentials: 'include' }, // 带上 Cookie
+  { credentials: 'include' }, // ★ 必须：带上 Cookie，否则拿不到 Set-Cookie，回调阶段会 403
 );
 const { authorize_url, expires_in } = await res.json();
 window.location.href = authorize_url;   // 或 window.open(...)
 ```
+
+使用 JSON 模式的**硬性前提**：
+
+1. 调用方必须带 `credentials: 'include'`；
+2. **调用方的前端 origin 必须在 `ALLOWED_CALLBACK_ORIGINS` 白名单内**，否则响应不会带
+   `Access-Control-Allow-Origin` / `Access-Control-Allow-Credentials`，浏览器既读不到响应体，
+   也存不下 `Set-Cookie`；
+3. 回调阶段由 **GitHub 发起顶层导航**访问 `/callback`，属于同站顶级 GET 导航，
+   `SameSite=Lax` 的 state Cookie 会随请求带回 —— 绑定因此成立（这正是与旧版「JSON 模式不依赖 Cookie」的不同之处）。
 
 **响应示例**：
 
@@ -112,8 +122,16 @@ window.location.href = authorize_url;   // 或 window.open(...)
 }
 ```
 
-> JSON 模式下 Worker 不依赖浏览器 Cookie（跨站 Cookie 不可靠），改由 KV 的一次性 `state` 提供
-> CSRF 防护；`state` 由 Worker 签发并只在本次响应里返回，请勿泄露给第三方。
+> ⚠️ **破坏性变更（升级须知）**：JSON 模式现在默认也要求完成 state Cookie 绑定。
+> 未按上面第 1、2 条改造的旧集成，会在 GitHub 回调阶段收到 **`403 state_mismatch`**。
+> 解决办法二选一：
+> - **推荐**：给 `/authorize` 请求补上 `credentials: 'include'`，并把前端 origin 加进
+>   `ALLOWED_CALLBACK_ORIGINS`；
+> - 或显式设置 `ALLOW_UNBOUND_STATE="true"` 恢复旧行为 —— 但这样 JSON 模式会退化为
+>   「只依赖 KV 的一次性 `state`」，**削弱 CSRF 防护**（login-CSRF 的前置条件被放开），
+>   仅在确实无法使用 Cookie 的集成场景下临时使用。
+>
+> `state` 由 Worker 签发并只在本次响应里返回，请勿泄露给第三方。
 
 ---
 
@@ -429,10 +447,12 @@ https://www.example.com/login/failed?status=error&error=state_expired&error_desc
 
 **Worker 侧**
 
-- [ ] GitHub OAuth App 的 callback URL = `https://<PUBLIC_BASE_URL>/callback`（https、无末尾斜杠）
-- [ ] 4 个 Secrets 已通过 `wrangler secret put` 注入，且 `COOKIE_SECRET` / `CALLBACK_SIGNING_SECRET` 各 ≥32 字节随机
-- [ ] `ALLOWED_CALLBACK_URIS` 精确列出业务回调地址；`ALLOWED_CALLBACK_ORIGINS` 列出业务前端域名
+- [ ] GitHub OAuth App 的 callback URL = `<PUBLIC_BASE_URL（若已显式设置）或 Worker 的实际域名>/callback`（https、无末尾斜杠）
+- [ ] 4 个 Secrets 已通过 `wrangler secret put` 注入，且满足长度下限（`GITHUB_CLIENT_ID` ≥10、`GITHUB_CLIENT_SECRET` ≥16、`COOKIE_SECRET` ≥16、`CALLBACK_SIGNING_SECRET` ≥32 字符）；三把随机密钥去重后**字符种类均 ≥8**，且 `COOKIE_SECRET` 与 `CALLBACK_SIGNING_SECRET` **不相同**
+- [ ] `ALLOWED_CALLBACK_URIS` 精确列出业务回调地址；`ALLOWED_CALLBACK_ORIGINS` 列出业务前端域名（**强烈建议必填**，服务端仅告警、不强制；留空 = 不校验来源）
 - [ ] `ALLOWED_REDIRECT_ORIGINS` 列出成功/失败跳转域名
+- [ ] 生产环境显式设置 `PUBLIC_BASE_URL` 为 `https://` 域名
+- [ ] JSON 模式集成：`/authorize` 带 `credentials: 'include'`，且前端 origin 在 `ALLOWED_CALLBACK_ORIGINS` 内（`ALLOW_UNBOUND_STATE` 保持 `false`）
 - [ ] `ALLOW_INSECURE_REDIRECTS=false`、`ENVIRONMENT=production`、`LOG_LEVEL=info`
 - [ ] 已绑定 `OAUTH_KV`（以及 `RATE_LIMIT_KV`）；`/` 页面自检无红色告警
 - [ ] `curl "$WORKER/health?deep=1"` 各项 `ok=true`，`github_api.latency_ms` 合理（通常 < 300ms）
@@ -457,5 +477,6 @@ https://www.example.com/login/failed?status=error&error=state_expired&error_desc
 | 回调端点收到请求但验签失败 | 检查是否用了框架解析后的 body 重新序列化（必须留原始字节）；检查密钥两端是否一致；检查是否误读 `sha256=` 前缀 |
 | 同一用户建了两次账号 | 幂等去重没做，或唯一键用了 `login` |
 | 用户重复刷新回调页导致登录失败 | 正常现象：`code` 与 `state` 都是一次性的；前端应避免回退/刷新回调地址 |
+| JSON 模式回调返回 `403 state_mismatch` | 前端调用 `/authorize` 时未带 `credentials: 'include'`，或其 origin 不在 `ALLOWED_CALLBACK_ORIGINS` 内。补上二者即可（详见 §1 方式 C） |
 | 前端在成功页拿不到登录态 | 跳转可能先于回传完成，前端应轮询 `/api/me` 或由成功页触发一次会话检查 |
 | 想换掉 GitHub 账号体系 | 只需改 `DEFAULT_SCOPE` 与前端展示，业务侧契约不变 |
