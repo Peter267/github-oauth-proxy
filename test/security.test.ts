@@ -202,3 +202,120 @@ describe('S-05 回调侧二次校验回传白名单', () => {
     expect(stub.calls.length).toBe(0);
   });
 });
+
+describe('S-06 回跳地址（error_redirect / success_redirect）必须做使用前二次校验', () => {
+  /** 构造一条「redirect_uri 合法、但回跳地址可被投毒」的 KV 记录 */
+  async function poisonRecord(
+    kv: ReturnType<typeof createFakeKv>,
+    nonce: string,
+    redirects: { success_redirect?: string | null; error_redirect?: string | null },
+  ): Promise<void> {
+    await kv.put(
+      `oauth:state:${nonce}`,
+      JSON.stringify({
+        redirect_uri: CALLBACK_URI,
+        business_state: 'BIZ_SECRET',
+        scope: 'read:user',
+        success_redirect: redirects.success_redirect ?? null,
+        error_redirect: redirects.error_redirect ?? null,
+        cookie_bound: false,
+        created_at: Date.now(),
+        request_id: 'poisoned',
+        origin_fp: null,
+      }),
+    );
+  }
+
+  it('KV 投毒 error_redirect 为站外地址：不出现指向该地址的 Location，且业务 state 不泄露', async () => {
+    stub = stubFetch([]);
+    const kv = createFakeKv();
+    await poisonRecord(kv, 'poison-error', { error_redirect: 'https://evil.example.net/steal' });
+
+    const response = await handleCallback(
+      new Request('https://proxy.test/callback?error=access_denied&state=poison-error'),
+      testConfig({ OAUTH_KV: kv }),
+      'rid-poison-error',
+    );
+
+    expect(response.headers.get('Location')).toBeNull();
+    const body = await response.text();
+    expect(body).not.toContain('evil.example.net');
+    expect(body).not.toContain('BIZ_SECRET');
+  });
+
+  it('KV 投毒 success_redirect 为站外地址：成功回调不 302 到站外，渲染内置成功页', async () => {
+    stub = githubStub();
+    const kv = createFakeKv();
+    await poisonRecord(kv, 'poison-success', { success_redirect: 'https://evil.example.net/win' });
+
+    const response = await handleCallback(
+      new Request('https://proxy.test/callback?code=c&state=poison-success'),
+      testConfig({ OAUTH_KV: kv }),
+      'rid-poison-success',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Location')).toBeNull();
+    expect(await response.text()).not.toContain('evil.example.net');
+  });
+
+  it('白名单内的 error_redirect 仍然正常 302 并带回业务 state', async () => {
+    const kv = createFakeKv();
+    await poisonRecord(kv, 'ok-error', { error_redirect: 'https://www.example.com/login/failed' });
+
+    const response = await handleCallback(
+      new Request('https://proxy.test/callback?error=access_denied&state=ok-error'),
+      testConfig({ OAUTH_KV: kv }),
+      'rid-ok-error',
+    );
+
+    expect(response.status).toBe(302);
+    const location = new URL(response.headers.get('Location') as string);
+    expect(location.origin + location.pathname).toBe('https://www.example.com/login/failed');
+    expect(location.searchParams.get('state')).toBe('BIZ_SECRET');
+  });
+
+  it('白名单内的 success_redirect 仍然正常 302 并带回业务 state', async () => {
+    stub = githubStub();
+    const kv = createFakeKv();
+    await poisonRecord(kv, 'ok-success', { success_redirect: 'https://www.example.com/win' });
+
+    const response = await handleCallback(
+      new Request('https://proxy.test/callback?code=c&state=ok-success'),
+      testConfig({ OAUTH_KV: kv }),
+      'rid-ok-success',
+    );
+
+    expect(response.status).toBe(302);
+    const location = new URL(response.headers.get('Location') as string);
+    expect(location.origin + location.pathname).toBe('https://www.example.com/win');
+    expect(location.searchParams.get('state')).toBe('BIZ_SECRET');
+  });
+
+  it('TOCTOU：授权后白名单收紧，state TTL 内的回调也不会跳到「现已不合法」的地址', async () => {
+    stub = githubStub();
+    const kv = createFakeKv();
+    // /authorize 时该地址在白名单内
+    const wide = testConfig({
+      OAUTH_KV: kv,
+      ALLOWED_REDIRECT_ORIGINS: 'https://www.example.com',
+      SUCCESS_REDIRECT: 'https://www.example.com/win',
+    });
+    const { nonce, setCookie } = await startFlow(
+      `redirect_uri=${encodeURIComponent(CALLBACK_URI)}&state=BIZ_SECRET`,
+      wide,
+    );
+    const cookie = cookiePair(setCookie, COOKIE_NAME);
+
+    // 之后运维收紧白名单：ALLOWED_REDIRECT_ORIGINS 清空（此时只允许本站同源）
+    const narrowed = testConfig({ OAUTH_KV: kv, ALLOWED_REDIRECT_ORIGINS: '' });
+    const response = await handleCallback(
+      new Request(`https://proxy.test/callback?code=c&state=${nonce}`, { headers: { Cookie: cookie } }),
+      narrowed,
+      'rid-toctou',
+    );
+
+    expect(response.headers.get('Location')).toBeNull();
+    expect(response.status).toBe(200);
+  });
+});

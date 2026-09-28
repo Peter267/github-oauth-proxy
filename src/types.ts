@@ -45,6 +45,8 @@ export interface Env {
   DELIVERY_METHOD?: string;
   DELIVERY_TIMEOUT_MS?: string;
   ALLOW_INSECURE_REDIRECTS?: string;
+  /** "true" 时才允许 JSON 模式跳过 state Cookie 绑定（默认 false，即必须绑定） */
+  ALLOW_UNBOUND_STATE?: string;
   ENVIRONMENT?: string;
   VERSION?: string;
   LOG_LEVEL?: string;

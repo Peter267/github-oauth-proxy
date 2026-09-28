@@ -280,7 +280,7 @@ describe('白名单与来源校验', () => {
     expect(body.request_id).toBe('rid-missing');
   });
 
-  it('JSON 模式返回 authorize_url 且不带浏览器 Cookie 绑定', async () => {
+  it('JSON 模式返回 authorize_url，并同样下发绑定 Cookie（默认必须绑定）', async () => {
     const config = testConfig();
     const request = new Request(
       `https://proxy.test/authorize?format=json&redirect_uri=${encodeURIComponent(CALLBACK_URI)}`,

@@ -26,6 +26,7 @@ import {
   normalizeUrl,
 } from '../validation.js';
 import {
+  applySecurityHeaders,
   buildRedirectWithResult,
   errorResponse,
   jsonResponse,
@@ -163,8 +164,13 @@ export async function handleAuthorize(
       scope,
       success_redirect: successRedirect,
       error_redirect: errorRedirect,
-      // JSON 模式下 Cookie 跨站不可靠，改为仅依赖 KV 的一次性 nonce
-      cookie_bound: !jsonMode,
+      // 默认连 JSON 模式也必须绑定 Cookie：仅靠 KV 的一次性 nonce 挡不住 login-CSRF
+      // （攻击者用自己的 nonce 诱导受害者浏览器带着受害者 code 回调，即可把 token
+      // 投递给业务服务器并顶掉受害者会话）。JSON 模式同样会下发 Set-Cookie，
+      // 只要前端调用 /authorize 时带 credentials，回调即可正常通过校验。
+      // 仅当显式设置 ALLOW_UNBOUND_STATE=true 时才恢复「不绑」的旧行为 ——
+      // 那不是免费的兼容开关，而是主动接受 login-CSRF 风险的降级。
+      cookie_bound: !(jsonMode && config.allowUnboundState),
       created_at: Date.now(),
       request_id: requestId,
       origin_fp: ipFp,
@@ -192,13 +198,9 @@ export async function handleAuthorize(
 
     if (jsonMode) {
       const corsHeaders = buildCorsHeaders(request, config);
-      const headers = new Headers({
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store, no-cache, must-revalidate',
-        'Referrer-Policy': 'no-referrer',
-        'X-Request-Id': requestId,
-        'X-Proxy-Version': config.version,
-      });
+      // 统一走 applySecurityHeaders：此前这里手写头清单，漏掉了 nosniff / X-Frame-Options / Pragma。
+      const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8' });
+      applySecurityHeaders(headers, requestId, config);
       for (const [key, value] of Object.entries(corsHeaders)) headers.set(key, value);
       if (setCookie) headers.append('Set-Cookie', setCookie);
 

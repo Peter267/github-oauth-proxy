@@ -19,10 +19,11 @@ import {
   loadConfig,
   findMissingSecrets,
   findPlaceholderSecrets,
+  findInvalidSecrets,
   type Config,
 } from './config.js';
 import { logger, newRequestId, setLogLevel } from './logger.js';
-import { errorResponse, rawErrorResponse, wantsJson } from './responses.js';
+import { errorResponse, rawErrorResponse, wantsJson, applySecurityHeaders } from './responses.js';
 import { renderLandingPage, type LandingInfo, type SetupState } from './pages.js';
 import { handleAuthorize, buildCorsHeaders } from './handlers/authorize.js';
 import { handleCallback } from './handlers/callback.js';
@@ -35,12 +36,13 @@ function normalizePath(pathname: string): string {
 }
 
 const SETUP_HINT =
-  '空值与模板占位符都会被主动拒绝，这是刻意的 fail-closed 设计：宁可启动即失败，也不要带着公开可知的密钥对外服务。';
+  '空值、模板占位符与取值非法（类型不是字符串、仅含空白字符）都会被主动拒绝，这是刻意的 fail-closed 设计：宁可启动即失败，也不要带着公开可知或不可用的密钥对外服务。';
 
 function buildSetupState(env: Env): SetupState {
   return {
     missing: findMissingSecrets(env),
     placeholders: findPlaceholderSecrets(env),
+    invalid: findInvalidSecrets(env).map(({ name, type, reason }) => ({ name, type, reason })),
     kvMissing: !env.OAUTH_KV,
     hint: SETUP_HINT,
   };
@@ -73,15 +75,9 @@ function renderSetupLanding(env: Env, url: URL, requestId: string): Response {
     setup: buildSetupState(env),
   };
 
-  const headers = new Headers({
-    'Content-Type': 'text/html; charset=utf-8',
-    'Cache-Control': 'no-store, no-cache, must-revalidate',
-    'Referrer-Policy': 'no-referrer',
-    'X-Content-Type-Options': 'nosniff',
-    'X-Frame-Options': 'DENY',
-    'X-Request-Id': requestId,
-    'X-Proxy-Version': info.version,
-  });
+  // 统一走 applySecurityHeaders：此前这里手写头清单，漏掉了 Pragma: no-cache。
+  const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8' });
+  applySecurityHeaders(headers, requestId, { version: info.version });
   // 503 是诚实的语义：服务已部署但尚不可用。人类看到引导页，探针看到 503。
   return new Response(renderLandingPage(info), { status: 503, headers });
 }
@@ -92,7 +88,9 @@ function collectConfigIssues(config: Config): string[] {
     issues.push('• ALLOWED_CALLBACK_URIS 未配置：/authorize 会拒绝所有请求');
   }
   if (config.allowedCallbackOrigins.length === 0) {
-    issues.push('• ALLOWED_CALLBACK_ORIGINS 未配置：不校验请求来源（建议至少配置业务前端域名）');
+    issues.push(
+      '• ALLOWED_CALLBACK_ORIGINS 未配置：完全不做来源校验，任意站点都能发起授权（login-CSRF 前置条件），请列入业务前端域名',
+    );
   }
   if (config.allowedRedirectOrigins.length === 0 && (config.successRedirect || config.errorRedirect)) {
     issues.push('• 配置了默认跳转但 ALLOWED_REDIRECT_ORIGINS 为空：默认跳转会被忽略');
@@ -102,6 +100,11 @@ function collectConfigIssues(config: Config): string[] {
   }
   if (config.allowInsecureRedirects) {
     issues.push('• ALLOW_INSECURE_REDIRECTS=true：允许 http 跳转，仅应在联调环境开启');
+  }
+  if (config.allowUnboundState) {
+    issues.push(
+      '• ALLOW_UNBOUND_STATE=true：JSON 模式下不校验 state Cookie 绑定，存在 login-CSRF 风险，仅应在无法携带 Cookie 的集成中临时开启',
+    );
   }
   if (config.environment === 'production' && config.baseUrl.startsWith('http://')) {
     issues.push('• 生产环境 PUBLIC_BASE_URL 使用了 http://，GitHub 会拒绝非 https 回调');
@@ -128,15 +131,9 @@ function renderLanding(config: Config, requestId: string): Response {
     setup: null,
   };
 
-  const headers = new Headers({
-    'Content-Type': 'text/html; charset=utf-8',
-    'Cache-Control': 'no-store',
-    'Referrer-Policy': 'no-referrer',
-    'X-Content-Type-Options': 'nosniff',
-    'X-Frame-Options': 'DENY',
-    'X-Request-Id': requestId,
-    'X-Proxy-Version': config.version,
-  });
+  // 统一走 applySecurityHeaders：此前这里手写头清单，漏掉了 Pragma: no-cache。
+  const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8' });
+  applySecurityHeaders(headers, requestId, { version: config.version });
   return new Response(renderLandingPage(info), { status: 200, headers });
 }
 
@@ -175,7 +172,12 @@ export default {
         return renderSetupLanding(env, url, requestId);
       }
 
-      return errorResponse(request, appError, requestId);
+      // bootstrap 阶段还没有 Config，但必须把 environment 传给错误渲染，
+      // 否则 production 下会误判为「非生产」并把 detail（缺失项名称 / 内部 hint）泄露出去。
+      return errorResponse(request, appError, requestId, {
+        environment: env.ENVIRONMENT || 'production',
+        version: env.VERSION || '1.0.0',
+      });
     }
 
     try {

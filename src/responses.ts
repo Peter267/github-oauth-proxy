@@ -16,12 +16,28 @@ export const SECURITY_HEADERS: Record<string, string> = {
 
 export const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
 
-function applyCommonHeaders(headers: Headers, requestId: string, config?: Config): void {
+/**
+ * 渲染错误 / 安全头所需的最小上下文。
+ *
+ * bootstrap 阶段（loadConfig 抛错）还没构造出完整 Config，但「是否 production」必须能正确判定，
+ * 否则生产环境会泄露 detail；因此这里用 `Pick` 表达「只关心 environment / version」，
+ * 既能接收完整 Config，也能接收一个最小字面量对象，且不引入 `any`。
+ */
+export type ResponseContext = Pick<Config, 'environment' | 'version'>;
+
+/**
+ * 把安全响应头 + request id 应用到已构造的 Headers 上。
+ *
+ * 这是全站安全响应头的**唯一**定义与下发处：任何「自己拼 Response」的分支
+ * （首页 / 配置引导页 / /authorize JSON 模式 / /callback 成功页 …）都必须走它，
+ * 否则就会出现「某个页面没有 nosniff / Pragma」的整类漏设问题。
+ */
+export function applySecurityHeaders(headers: Headers, requestId: string, context?: Pick<Config, 'version'>): void {
   for (const [key, value] of Object.entries(SECURITY_HEADERS)) {
     headers.set(key, value);
   }
   headers.set('X-Request-Id', requestId);
-  if (config) headers.set('X-Proxy-Version', config.version);
+  if (context) headers.set('X-Proxy-Version', context.version);
 }
 
 export function jsonResponse(
@@ -31,7 +47,7 @@ export function jsonResponse(
   extraHeaders: Record<string, string> = {},
 ): Response {
   const headers = new Headers({ 'Content-Type': JSON_CONTENT_TYPE });
-  applyCommonHeaders(headers, requestId);
+  applySecurityHeaders(headers, requestId);
   for (const [key, value] of Object.entries(extraHeaders)) headers.set(key, value);
   return new Response(JSON.stringify(body, null, 2), { status, headers });
 }
@@ -43,14 +59,14 @@ export function redirectResponse(
   extraHeaders: Record<string, string> = {},
 ): Response {
   const headers = new Headers({ Location: location });
-  applyCommonHeaders(headers, requestId);
+  applySecurityHeaders(headers, requestId);
   for (const [key, value] of Object.entries(extraHeaders)) headers.set(key, value);
   return new Response(null, { status, headers });
 }
 
 export function htmlResponse(html: string, status: number, requestId: string): Response {
   const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8' });
-  applyCommonHeaders(headers, requestId);
+  applySecurityHeaders(headers, requestId);
   return new Response(html, { status, headers });
 }
 
@@ -63,9 +79,9 @@ export function wantsJson(request: Request): boolean {
   return false;
 }
 
-function renderErrorPage(error: AppError, requestId: string, config?: Config): string {
+function renderErrorPage(error: AppError, requestId: string, context?: ResponseContext): string {
   const status = error.status;
-  const detail = config?.environment === 'production' ? undefined : error.detail;
+  const detail = context?.environment === 'production' ? undefined : error.detail;
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -110,16 +126,21 @@ export function errorResponse(
   request: Request,
   error: AppError,
   requestId: string,
-  config?: Config,
+  context?: ResponseContext,
   extraHeaders: Record<string, string> = {},
 ): Response {
   if (wantsJson(request)) {
-    return jsonResponse(error.toJSON(requestId), error.status, requestId, extraHeaders);
+    const body = error.toJSON(requestId);
+    // 与 HTML 分支保持同一口径：production 不返回 detail（缺失项名称 / 内部 hint 都属于配置侦察面）
+    if (context?.environment === 'production') {
+      delete (body.error as Record<string, unknown>).detail;
+    }
+    return jsonResponse(body, error.status, requestId, extraHeaders);
   }
   const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8' });
-  applyCommonHeaders(headers, requestId, config);
+  applySecurityHeaders(headers, requestId, context);
   for (const [key, value] of Object.entries(extraHeaders)) headers.set(key, value);
-  return new Response(renderErrorPage(error, requestId, config), { status: error.status, headers });
+  return new Response(renderErrorPage(error, requestId, context), { status: error.status, headers });
 }
 
 /**
@@ -169,7 +190,7 @@ export function notFound(request: Request, requestId: string, config: Config): R
 
 export function rawErrorResponse(code: ErrorCode, message: string, status: number, requestId: string): Response {
   const headers = new Headers({ 'Content-Type': JSON_CONTENT_TYPE });
-  applyCommonHeaders(headers, requestId);
+  applySecurityHeaders(headers, requestId);
   return new Response(
     JSON.stringify(
       {

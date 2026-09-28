@@ -10,7 +10,7 @@
  *   6. HMAC 签名后 POST 给业务服务器（redirect_uri）
  *   7. 302 到 success_redirect，或渲染内置成功页
  *
- * 任何一步失败都会带上 record.error_redirect（若已配置且在白名单内）优雅回跳。
+ * 任何一步失败都会带上 record.error_redirect（若已配置且经**使用前二次白名单校验**）优雅回跳。
  */
 
 import { AppError, isAppError } from '../errors.js';
@@ -19,14 +19,16 @@ import { logger } from '../logger.js';
 import { checkRateLimit } from '../ratelimit.js';
 import { exchangeCodeForToken, fetchGithubUser, fetchPrimaryEmail } from '../github.js';
 import { clearStateCookie, consumeState, readStateCookie, type StateRecord } from '../state.js';
-import { assertCallbackUriAllowed } from '../validation.js';
+import { assertBrowserRedirectAllowed, assertCallbackUriAllowed, normalizeUrl } from '../validation.js';
 import { deliverToBusinessServer, type DeliveryPayload, type DeliveryUserInfo } from '../deliver.js';
 import {
+  applySecurityHeaders,
   buildRedirectWithResult,
   errorResponse,
   jsonResponse,
   methodNotAllowed,
   redirectResponse,
+  wantsJson,
 } from '../responses.js';
 import { renderSuccessPage } from '../pages.js';
 import type { Config } from '../config.js';
@@ -187,7 +189,18 @@ export async function handleCallback(
       ip_fp: rate.fingerprint,
     });
 
-    const errorRedirect = record?.error_redirect ?? config.errorRedirect;
+    // 失败跳转地址一律以 KV 记录为准，且必须**在使用前再做一次白名单校验**：
+    // /authorize 阶段虽已用 assertBrowserRedirectAllowed 校验并写入记录，但 KV 可能被投毒，
+    // 或者记录写入后运维收紧了 ALLOWED_REDIRECT_ORIGINS（state TTL 内的 TOCTOU）。
+    // 校验不通过则视为未配置（渲染内置结果页），绝不 302 到白名单外地址 ——
+    // 否则会把业务 state / error_description 通过 query 泄露给站外域名。
+    // 这里也不回落 config.errorRedirect：那等于把未经校验的原始配置值拿去 302。
+    const errorRedirect = trustedBrowserRedirect(
+      record?.error_redirect ?? null,
+      config,
+      requestId,
+      'error_redirect',
+    );
     if (appError.redirectable && errorRedirect) {
       return redirectResponse(
         buildRedirectWithResult(errorRedirect, {
@@ -242,9 +255,12 @@ function buildSuccessResponse(
 ): Response {
   const setCookie = { 'Set-Cookie': clearStateCookie(config) };
 
-  if (record.success_redirect) {
+  // 成功跳转地址同样要在使用前二次校验（KV 投毒 / 白名单收紧的 TOCTOU），
+  // 不通过则不 302、退回内置成功页，避免业务 state 被带到站外域名。
+  const successRedirect = trustedBrowserRedirect(record.success_redirect, config, requestId, 'success_redirect');
+  if (successRedirect) {
     return redirectResponse(
-      buildRedirectWithResult(record.success_redirect, {
+      buildRedirectWithResult(successRedirect, {
         status: 'ok',
         state: record.business_state,
         request_id: requestId,
@@ -255,7 +271,10 @@ function buildSuccessResponse(
     );
   }
 
-  if (wantsJsonCallback(request)) {
+  // 内容协商复用全站口径：?format=json 与 Accept: application/json 等价。
+  // 此前成功分支只认 ?format=json，而失败分支走 errorResponse → wantsJson（两者都认），
+  // 导致同一端点在带 Accept 头时「成功返 HTML、失败返 JSON」，集成方无从对齐。
+  if (wantsJson(request)) {
     // 刻意不回传 access_token 给浏览器：它只应出现在服务端到服务端的签名报文里
     return jsonResponse(
       {
@@ -273,11 +292,10 @@ function buildSuccessResponse(
   }
 
   const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8' });
+  // 复用 responses.ts 的统一安全头（全站唯一头清单），避免本分支日后再次漏设
+  // nosniff / X-Frame-Options / Pragma 这类整类问题。
+  applySecurityHeaders(headers, requestId, config);
   headers.set('Set-Cookie', clearStateCookie(config));
-  headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-  headers.set('Referrer-Policy', 'no-referrer');
-  headers.set('X-Request-Id', requestId);
-  headers.set('X-Proxy-Version', config.version);
 
   return new Response(
     renderSuccessPage({ login, name, avatarUrl, requestId, state: record.business_state }),
@@ -285,8 +303,33 @@ function buildSuccessResponse(
   );
 }
 
-function wantsJsonCallback(request: Request): boolean {
-  return new URL(request.url).searchParams.get('format') === 'json';
+/**
+ * 对 KV 记录中的浏览器跳转地址做「使用前」二次白名单校验（纵深防御）。
+ *
+ * 与 authorize.ts 的 resolveBrowserRedirect 同源：normalizeUrl + assertBrowserRedirectAllowed。
+ * 不通过时返回 null 并记录 callback.redirect_ignored 告警（与 authorize.redirect_ignored 同风格），
+ * 由调用方退回内置结果页 —— 保持「即使 KV 被投毒也绝不放行白名单外地址」的既有契约。
+ */
+function trustedBrowserRedirect(
+  raw: string | null,
+  config: Config,
+  requestId: string,
+  field: 'success_redirect' | 'error_redirect',
+): string | null {
+  if (!raw) return null;
+  try {
+    const url = normalizeUrl(raw, config.allowInsecureRedirects);
+    assertBrowserRedirectAllowed(url, config.allowedRedirectOrigins, config.baseUrl);
+    return url.toString();
+  } catch (error) {
+    logger.warn('callback.redirect_ignored', {
+      request_id: requestId,
+      field,
+      value: raw.slice(0, 200),
+      reason: error instanceof AppError ? error.code : 'invalid_url',
+    });
+    return null;
+  }
 }
 
 function safeOrigin(target: string): string {

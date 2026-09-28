@@ -136,3 +136,106 @@ describe('Worker 入口', () => {
     expect(response.headers.get('Referrer-Policy')).toBe('no-referrer');
   });
 });
+
+describe('G-4 production 下 bootstrap 失败不得泄露 detail', () => {
+  const brokenProduction = (): Env =>
+    env({ ENVIRONMENT: 'production', GITHUB_CLIENT_SECRET: '' });
+
+  it('JSON 响应不含 detail（缺 GITHUB_CLIENT_SECRET 时）', async () => {
+    const response = await worker.fetch(
+      new Request('https://proxy.test/health', { headers: { Accept: 'application/json' } }),
+      brokenProduction(),
+      ctx,
+    );
+    expect(response.status).toBe(500);
+    const text = await response.text();
+    expect(text).toContain('server_misconfigured');
+    expect(text).not.toContain('detail');
+    expect(text).not.toContain('GITHUB_CLIENT_SECRET');
+    expect(text).not.toContain('hint');
+  });
+
+  it('HTML 错误页不含 detail（缺 GITHUB_CLIENT_SECRET 时）', async () => {
+    const response = await worker.fetch(
+      new Request('https://proxy.test/health'),
+      brokenProduction(),
+      ctx,
+    );
+    expect(response.status).toBe(500);
+    expect(response.headers.get('Content-Type')).toContain('text/html');
+    const html = await response.text();
+    expect(html).not.toContain('GITHUB_CLIENT_SECRET');
+    expect(html).not.toContain('wrangler secret put');
+  });
+
+  it('未知路由同样是 production 不暴露 detail', async () => {
+    const response = await worker.fetch(
+      new Request('https://proxy.test/nope', { headers: { Accept: 'application/json' } }),
+      env({ ENVIRONMENT: 'production' }),
+      ctx,
+    );
+    expect(response.status).toBe(404);
+    const text = await response.text();
+    expect(text).not.toContain('detail');
+    expect(text).not.toContain('routes');
+  });
+
+  it('非 production（test）仍保留 detail，便于自检与联调', async () => {
+    const json = await worker.fetch(
+      new Request('https://proxy.test/health', { headers: { Accept: 'application/json' } }),
+      env({ GITHUB_CLIENT_SECRET: '' }),
+      ctx,
+    );
+    expect(await json.text()).toContain('GITHUB_CLIENT_SECRET');
+
+    // 首页/引导页是刻意的首次部署引导，无论环境都点名缺失项（保持既有契约）
+    const setup = await worker.fetch(new Request('https://proxy.test/'), brokenProduction(), ctx);
+    expect(setup.status).toBe(503);
+    expect(await setup.text()).toContain('GITHUB_CLIENT_SECRET');
+  });
+});
+
+describe('G-6 所有响应分支统一下发安全头', () => {
+  function assertSecurityHeaders(response: Response): void {
+    expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(response.headers.get('X-Frame-Options')).toBe('DENY');
+    expect(response.headers.get('Cache-Control')).toContain('no-store');
+    expect(response.headers.get('Pragma')).toBe('no-cache');
+    expect(response.headers.get('Referrer-Policy')).toBe('no-referrer');
+  }
+
+  it('首页（200）带齐安全头', async () => {
+    const response = await worker.fetch(new Request('https://proxy.test/'), env(), ctx);
+    expect(response.status).toBe(200);
+    assertSecurityHeaders(response);
+    expect(response.headers.get('X-Proxy-Version')).toBeTruthy();
+  });
+
+  it('配置引导页（503）带齐安全头', async () => {
+    const response = await worker.fetch(
+      new Request('https://proxy.test/'),
+      env({ GITHUB_CLIENT_SECRET: '' }),
+      ctx,
+    );
+    expect(response.status).toBe(503);
+    assertSecurityHeaders(response);
+  });
+
+  it('/authorize?format=json 的 JSON 分支带齐安全头', async () => {
+    const response = await worker.fetch(
+      new Request(
+        `https://proxy.test/authorize?format=json&redirect_uri=${encodeURIComponent(
+          'https://api.example.com/auth/github/callback',
+        )}`,
+        { headers: { Origin: 'https://www.example.com' } },
+      ),
+      env(),
+      ctx,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toContain('application/json');
+    assertSecurityHeaders(response);
+    expect(response.headers.get('Set-Cookie')).toContain('gh_oauth_state');
+    expect(response.headers.get('X-Proxy-Version')).toBeTruthy();
+  });
+});

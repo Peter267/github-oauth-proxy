@@ -69,6 +69,8 @@ export interface SetupState {
   missing: string[];
   /** 值仍是仓库模板占位符的 Secret 名称 */
   placeholders: string[];
+  /** 取值非法（类型不是字符串，或仅含空白/不可见字符）的 Secret */
+  invalid: Array<{ name: string; type: string; reason: 'not_string' | 'blank' }>;
   /** 是否缺少 OAUTH_KV 绑定 */
   kvMissing: boolean;
   /** 排查建议 */
@@ -132,7 +134,28 @@ function renderSetupSection(info: LandingInfo, setup: SetupState): string {
         .join(' ')}</li>`,
     );
   }
+  // 必须点名：类型非法/纯空白既不算「缺失」也不算「占位符」，
+  // 若这里不列出来，用户会看到一个不说明任何问题的「待配置」页而无从下手。
+  if (setup.invalid.length > 0) {
+    reasons.push(
+      `<li>取值非法、会被服务端直接拒绝的 Secret：${setup.invalid
+        .map(
+          (item) =>
+            `<code>${escapeHtml(item.name)}</code>（${
+              item.reason === 'blank'
+                ? '仅含空白或不可见字符'
+                : `类型为 ${escapeHtml(item.type)}，应为字符串`
+            }）`,
+        )
+        .join('、')}</li>`,
+    );
+  }
   if (setup.kvMissing) reasons.push('<li>缺少 <code>OAUTH_KV</code> 绑定</li>');
+
+  const reasonList =
+    reasons.length > 0
+      ? reasons.join('')
+      : '<li>配置校验未通过，请检查 Cloudflare 控制台里的变量与机密。</li>';
 
   const secretFields = [
     'GITHUB_CLIENT_ID',
@@ -150,7 +173,7 @@ function renderSetupSection(info: LandingInfo, setup: SetupState): string {
 
     <div class="warnbox">
       <p>当前未就绪的原因</p>
-      <ul class="tight">${reasons.join('')}</ul>
+      <ul class="tight">${reasonList}</ul>
     </div>
 
     <ol class="steps">
@@ -180,10 +203,14 @@ function renderSetupSection(info: LandingInfo, setup: SetupState): string {
         <ul class="tight">
           <li><code>ALLOWED_CALLBACK_URIS</code> —— <b>必填</b>，你的业务后端接收授权结果的地址，
               例如 <code>https://api.example.com/auth/github/callback</code>。留空会拒绝所有 <code>/authorize</code> 请求（fail-closed）。</li>
-          <li><code>ALLOWED_CALLBACK_ORIGINS</code> —— 业务前端域名，例如 <code>https://www.example.com</code>。</li>
+          <li><code>ALLOWED_CALLBACK_ORIGINS</code> —— <b>必填</b>，你的业务前端域名，例如
+              <code>https://www.example.com</code>。<b>留空等于完全不做来源校验</b>：
+              任意站点都能把用户送进授权流程（login-CSRF 的前置条件）。</li>
           <li><code>ALLOWED_REDIRECT_ORIGINS</code> —— 仅当你要用 <code>success_redirect</code> / <code>error_redirect</code> 跳转时才需要。</li>
         </ul>
         <p class="muted">多个值用英文逗号分隔。删掉默认值比保留错误值更安全。</p>
+        <p class="muted">另需注意：JSON 模式（<code>?format=json</code>）默认同样要求完成 state Cookie 绑定，
+           前端调用须带 <code>credentials: 'include'</code>；确需关闭请设 <code>ALLOW_UNBOUND_STATE=true</code>（会削弱 CSRF 防护）。</p>
       </li>
       <li data-step="4">
         <b>回到本页验证</b>
