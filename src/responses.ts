@@ -159,7 +159,7 @@ export function notFound(request: Request, requestId: string, config: Config): R
   return errorResponse(
     request,
     new AppError('not_found', `未知路由: ${new URL(request.url).pathname}`, {
-      detail: { routes: ['GET /', 'GET /health', 'GET|POST /authorize', 'GET /callback'] },
+      detail: { routes: ['GET /', 'GET /setup', 'GET /health', 'GET|POST /authorize', 'GET /callback'] },
       redirectable: false,
     }),
     requestId,
